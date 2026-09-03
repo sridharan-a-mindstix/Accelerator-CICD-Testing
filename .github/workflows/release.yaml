@@ -1,0 +1,398 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main # Must match release.branch in ci-cd-platform/.platform/config.yaml.
+             # If you change this literal, also update release.branch in config.yaml.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate configuration
+    runs-on: ubuntu-24.04
+    outputs:
+      application_name:                      ${{ steps.config.outputs.application_name }}
+      runtime:                               ${{ steps.config.outputs.runtime }}
+      python_version:                        ${{ steps.config.outputs.python_version }}
+      node_version:                          ${{ steps.config.outputs.node_version }}
+      java_version:                          ${{ steps.config.outputs.java_version }}
+      go_version:                            ${{ steps.config.outputs.go_version }}
+      dockerfile:                            ${{ steps.config.outputs.dockerfile }}
+      image_context:                         ${{ steps.config.outputs.image_context }}
+      platforms:                             ${{ steps.config.outputs.platforms }}
+      build_args:                            ${{ steps.config.outputs.build_args }}
+      ecr_repository:                        ${{ steps.config.outputs.ecr_repository }}
+      aws_region:                            ${{ steps.config.outputs.aws_region }}
+      aws_role_arn:                          ${{ steps.config.outputs.aws_role_arn }}
+      release_branch:                        ${{ steps.config.outputs.release_branch }}
+      secret_scan_enabled:                   ${{ steps.config.outputs.secret_scan_enabled }}
+      dependency_scan_enabled:               ${{ steps.config.outputs.dependency_scan_enabled }}
+      dependency_scan_severity:              ${{ steps.config.outputs.dependency_scan_severity }}
+      dependency_scan_exit_code:             ${{ steps.config.outputs.dependency_scan_exit_code }}
+      container_scan_enabled:                ${{ steps.config.outputs.container_scan_enabled }}
+      container_scan_severity:               ${{ steps.config.outputs.container_scan_severity }}
+      container_scan_exit_code:              ${{ steps.config.outputs.container_scan_exit_code }}
+      sbom_enabled:                          ${{ steps.config.outputs.sbom_enabled }}
+      sbom_retention_days:                   ${{ steps.config.outputs.sbom_retention_days }}
+      provenance_enabled:                    ${{ steps.config.outputs.provenance_enabled }}
+      code_scanning_enabled:                 ${{ steps.config.outputs.code_scanning_enabled }}
+      artifact_attestation_enabled:          ${{ steps.config.outputs.artifact_attestation_enabled }}
+      docker_build_record_enabled:           ${{ steps.config.outputs.docker_build_record_enabled }}
+      docker_build_record_retention_days:    ${{ steps.config.outputs.docker_build_record_retention_days }}
+      trivy_cache_enabled:                   ${{ steps.config.outputs.trivy_cache_enabled }}
+      deployment_metadata_retention_days:    ${{ steps.config.outputs.deployment_metadata_retention_days }}
+      deploy_enabled:                        ${{ steps.config.outputs.deploy_enabled }}
+      automatic_environment:                 ${{ steps.config.outputs.automatic_environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - id: config
+        name: Load repository configuration
+        uses: ./.github/actions/load-platform-config
+
+      # Guard: workflow_dispatch is only permitted from the configured release branch.
+      # on.push.branches already restricts automatic triggers; this step closes the
+      # manual dispatch gap where any branch with write access could publish an image.
+      - name: Restrict manual release to configured release branch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_BRANCH: ${{ steps.config.outputs.release_branch }}
+        run: |
+          if [[ "${GITHUB_REF_NAME}" != "${RELEASE_BRANCH}" ]]; then
+            echo "Manual release is only permitted from the '${RELEASE_BRANCH}' branch." >&2
+            echo "Current branch: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+  quality:
+    name: Runtime quality checks
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        if: needs.validate.outputs.runtime == 'python'
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: ${{ needs.validate.outputs.python_version }}
+
+      - name: Set up Node.js
+        if: needs.validate.outputs.runtime == 'node'
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ needs.validate.outputs.node_version }}
+
+      - name: Set up Java
+        if: needs.validate.outputs.runtime == 'java'
+        uses: actions/setup-java@v4.7.0
+        with:
+          distribution: temurin
+          java-version: ${{ needs.validate.outputs.java_version }}
+
+      - name: Set up Go
+        if: needs.validate.outputs.runtime == 'go'
+        uses: actions/setup-go@v5.5.0
+        with:
+          go-version: ${{ needs.validate.outputs.go_version }}
+
+      - name: Install platform helper dependencies
+        run: python3 -c "import yaml, jsonschema" 2>/dev/null || python3 -m pip install --disable-pip-version-check -r ci-cd-platform/scripts/requirements.txt
+
+      - name: Run install command
+        run: python3 ci-cd-platform/scripts/platform_config.py command --command install
+
+      - name: Run lint command
+        run: python3 ci-cd-platform/scripts/platform_config.py command --command lint
+
+      - name: Run test command
+        run: python3 ci-cd-platform/scripts/platform_config.py command --command test
+
+  source-security:
+    name: Source security checks
+    runs-on: ubuntu-24.04
+    needs: validate
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      # Secret scanning is mandatory — enabled and fail_on_findings are const: true in the schema.
+      # continue-on-error is intentionally absent; secret findings always block the pipeline.
+      - name: Secret scan (Gitleaks)
+        if: needs.validate.outputs.secret_scan_enabled == 'true'
+        env:
+          # linux/amd64 manifest digest for v8.30.1; ubuntu-24.04 hosted runners are x64.
+          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
+        run: bash ci-cd-platform/scripts/secret_scan.sh
+
+      - name: Cache Trivy vulnerability database
+        if: needs.validate.outputs.dependency_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Dependency and filesystem scan (Trivy)
+        if: needs.validate.outputs.dependency_scan_enabled == 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: ${{ needs.validate.outputs.dependency_scan_severity }}
+          exit-code: ${{ needs.validate.outputs.dependency_scan_exit_code }}
+          cache: ${{ needs.validate.outputs.trivy_cache_enabled }}
+          trivy-config: ""
+
+  source-code-scanning:
+    name: Optional source Code Scanning report
+    runs-on: ubuntu-24.04
+    needs: validate
+    if: >-
+      needs.validate.outputs.code_scanning_enabled == 'true' &&
+      needs.validate.outputs.dependency_scan_enabled == 'true'
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Cache Trivy vulnerability database
+        if: needs.validate.outputs.dependency_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Generate Trivy SARIF report
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: ${{ needs.validate.outputs.dependency_scan_severity }}
+          exit-code: "0"
+          cache: ${{ needs.validate.outputs.trivy_cache_enabled }}
+          trivy-config: ""
+
+      - name: Upload dependency scan SARIF
+        uses: github/codeql-action/upload-sarif@v3.29.0
+        with:
+          sarif_file: trivy-fs.sarif
+
+  publish:
+    name: Build, scan, and publish image
+    runs-on: ubuntu-24.04
+    needs:
+      - validate
+      - quality
+      - source-security
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+      image_digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.2.1
+        with:
+          role-to-assume: ${{ needs.validate.outputs.aws_role_arn }}
+          aws-region: ${{ needs.validate.outputs.aws_region }}
+
+      - id: ecr
+        name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      - id: meta
+        name: Prepare image metadata
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ needs.validate.outputs.ecr_repository }}
+        run: |
+          IMAGE_URI="${REGISTRY}/${REPOSITORY}"
+          echo "image_uri=${IMAGE_URI}" >> "${GITHUB_OUTPUT}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
+
+      - id: push
+        name: Build and push image to ECR
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: ${{ needs.validate.outputs.docker_build_record_enabled }}
+          DOCKER_BUILD_RECORD_RETENTION_DAYS: ${{ needs.validate.outputs.docker_build_record_retention_days }}
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: ${{ needs.validate.outputs.image_context }}
+          file: ${{ needs.validate.outputs.dockerfile }}
+          platforms: ${{ needs.validate.outputs.platforms }}
+          push: true
+          # Buildx-native SBOM is disabled in favour of anchore/sbom-action below,
+          # which produces a standalone SPDX artifact downloadable from the workflow run.
+          sbom: false
+          provenance: ${{ needs.validate.outputs.provenance_enabled }}
+          build-args: ${{ needs.validate.outputs.build_args }}
+          tags: ${{ env.IMAGE_URI }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Cache Trivy vulnerability database
+        if: needs.validate.outputs.container_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Container vulnerability scan (Trivy)
+        if: needs.validate.outputs.container_scan_enabled == 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_URI }}@${{ steps.push.outputs.digest }}
+          format: table
+          severity: ${{ needs.validate.outputs.container_scan_severity }}
+          exit-code: ${{ needs.validate.outputs.container_scan_exit_code }}
+          cache: ${{ needs.validate.outputs.trivy_cache_enabled }}
+          trivy-config: ""
+
+      # Single canonical SBOM generated by Syft/anchore — produces a standalone SPDX
+      # artifact attached to the workflow run. Buildx native SBOM is disabled above
+      # to avoid generating two inconsistent SBOMs from different tools.
+      - name: Generate SBOM (Syft/anchore)
+        if: needs.validate.outputs.sbom_enabled == 'true'
+        uses: anchore/sbom-action@v0.18.0
+        with:
+          image: ${{ env.IMAGE_URI }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Upload SBOM artifact
+        if: needs.validate.outputs.sbom_enabled == 'true'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: sbom-${{ needs.validate.outputs.application_name }}-${{ github.sha }}
+          path: sbom.spdx.json
+          retention-days: ${{ needs.validate.outputs.sbom_retention_days }}
+
+      - name: Create deployment metadata
+        env:
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE_REPOSITORY: ${{ env.IMAGE_URI }}
+          SOURCE_SHA: ${{ github.sha }}
+          # automatic_environment is the configured default deploy target.
+          # The Deploy workflow reads this field to route automatic deployments.
+          AUTOMATIC_ENVIRONMENT: ${{ needs.validate.outputs.automatic_environment }}
+          DEPLOY_ENABLED: ${{ needs.validate.outputs.deploy_enabled }}
+        run: python3 ci-cd-platform/scripts/workflow_handoff.py create-metadata
+
+      - name: Upload deployment metadata
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: deployment-metadata
+          path: deployment-metadata.json
+          if-no-files-found: error
+          retention-days: ${{ needs.validate.outputs.deployment_metadata_retention_days }}
+
+  image-code-scanning:
+    name: Optional image Code Scanning report
+    runs-on: ubuntu-24.04
+    needs:
+      - validate
+      - publish
+    if: needs.validate.outputs.code_scanning_enabled == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    steps:
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.2.1
+        with:
+          role-to-assume: ${{ needs.validate.outputs.aws_role_arn }}
+          aws-region: ${{ needs.validate.outputs.aws_region }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      - name: Cache Trivy vulnerability database
+        if: needs.validate.outputs.container_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Generate image Trivy SARIF report
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ needs.publish.outputs.image_uri }}@${{ needs.publish.outputs.image_digest }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: ${{ needs.validate.outputs.container_scan_severity }}
+          exit-code: "0"
+          cache: ${{ needs.validate.outputs.trivy_cache_enabled }}
+          trivy-config: ""
+
+      - name: Upload image scan SARIF
+        uses: github/codeql-action/upload-sarif@v3.29.0
+        with:
+          sarif_file: trivy-image.sarif
+
+  artifact-attestation:
+    name: Optional GitHub artifact attestation
+    runs-on: ubuntu-24.04
+    needs:
+      - validate
+      - publish
+    if: needs.validate.outputs.artifact_attestation_enabled == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4.2.1
+        with:
+          role-to-assume: ${{ needs.validate.outputs.aws_role_arn }}
+          aws-region: ${{ needs.validate.outputs.aws_region }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v2.3.0
+        with:
+          subject-name: ${{ needs.publish.outputs.image_uri }}
+          subject-digest: ${{ needs.publish.outputs.image_digest }}
+          push-to-registry: true

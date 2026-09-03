@@ -1,0 +1,129 @@
+name: Load platform configuration
+description: Validate and normalize ci-cd-platform/.platform/config.yaml.
+
+inputs:
+  target_environment:
+    description: Deployment environment to normalize; empty selects deploy.automatic_environment.
+    required: false
+    default: ""
+
+outputs:
+  application_name:
+    value: ${{ steps.config.outputs.application_name }}
+  runtime:
+    value: ${{ steps.config.outputs.runtime }}
+  python_version:
+    value: ${{ steps.config.outputs.python_version }}
+  node_version:
+    value: ${{ steps.config.outputs.node_version }}
+  java_version:
+    value: ${{ steps.config.outputs.java_version }}
+  go_version:
+    value: ${{ steps.config.outputs.go_version }}
+  dockerfile:
+    value: ${{ steps.config.outputs.dockerfile }}
+  image_context:
+    value: ${{ steps.config.outputs.image_context }}
+  platforms:
+    value: ${{ steps.config.outputs.platforms }}
+  build_args:
+    value: ${{ steps.config.outputs.build_args }}
+  ecr_repository:
+    value: ${{ steps.config.outputs.ecr_repository }}
+  aws_account_id:
+    value: ${{ steps.config.outputs.aws_account_id }}
+  aws_region:
+    value: ${{ steps.config.outputs.aws_region }}
+  aws_role_arn:
+    value: ${{ steps.config.outputs.aws_role_arn }}
+  release_branch:
+    value: ${{ steps.config.outputs.release_branch }}
+  secret_scan_enabled:
+    value: ${{ steps.config.outputs.secret_scan_enabled }}
+  dependency_scan_enabled:
+    value: ${{ steps.config.outputs.dependency_scan_enabled }}
+  dependency_scan_severity:
+    value: ${{ steps.config.outputs.dependency_scan_severity }}
+  dependency_scan_exit_code:
+    value: ${{ steps.config.outputs.dependency_scan_exit_code }}
+  container_scan_enabled:
+    value: ${{ steps.config.outputs.container_scan_enabled }}
+  container_scan_severity:
+    value: ${{ steps.config.outputs.container_scan_severity }}
+  container_scan_exit_code:
+    value: ${{ steps.config.outputs.container_scan_exit_code }}
+  sbom_enabled:
+    value: ${{ steps.config.outputs.sbom_enabled }}
+  sbom_retention_days:
+    value: ${{ steps.config.outputs.sbom_retention_days }}
+  deployment_metadata_retention_days:
+    value: ${{ steps.config.outputs.deployment_metadata_retention_days }}
+  provenance_enabled:
+    value: ${{ steps.config.outputs.provenance_enabled }}
+  code_scanning_enabled:
+    value: ${{ steps.config.outputs.code_scanning_enabled }}
+  artifact_attestation_enabled:
+    value: ${{ steps.config.outputs.artifact_attestation_enabled }}
+  github_environments_enabled:
+    value: ${{ steps.config.outputs.github_environments_enabled }}
+  docker_build_record_enabled:
+    value: ${{ steps.config.outputs.docker_build_record_enabled }}
+  docker_build_record_retention_days:
+    value: ${{ steps.config.outputs.docker_build_record_retention_days }}
+  trivy_cache_enabled:
+    value: ${{ steps.config.outputs.trivy_cache_enabled }}
+  build_check_enabled:
+    value: ${{ steps.config.outputs.build_check_enabled }}
+  deploy_enabled:
+    value: ${{ steps.config.outputs.deploy_enabled }}
+  deploy_environment:
+    value: ${{ steps.config.outputs.deploy_environment }}
+  automatic_environment:
+    value: ${{ steps.config.outputs.automatic_environment }}
+  github_environment:
+    value: ${{ steps.config.outputs.github_environment }}
+  deploy_aws_region:
+    value: ${{ steps.config.outputs.deploy_aws_region }}
+  deploy_aws_role_arn:
+    value: ${{ steps.config.outputs.deploy_aws_role_arn }}
+  eks_cluster_name:
+    value: ${{ steps.config.outputs.eks_cluster_name }}
+  helm_release_name:
+    value: ${{ steps.config.outputs.helm_release_name }}
+  helm_namespace:
+    value: ${{ steps.config.outputs.helm_namespace }}
+  helm_chart:
+    value: ${{ steps.config.outputs.helm_chart }}
+  helm_values_args:
+    value: ${{ steps.config.outputs.helm_values_args }}
+  helm_set_values_args:
+    value: ${{ steps.config.outputs.helm_set_values_args }}
+  helm_container_name:
+    value: ${{ steps.config.outputs.helm_container_name }}
+  helm_timeout:
+    value: ${{ steps.config.outputs.helm_timeout }}
+  helm_atomic:
+    value: ${{ steps.config.outputs.helm_atomic }}
+  helm_create_namespace:
+    value: ${{ steps.config.outputs.helm_create_namespace }}
+  helm_history_max:
+    value: ${{ steps.config.outputs.helm_history_max }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install configuration dependencies
+      shell: bash
+      run: python3 -c "import yaml, jsonschema" 2>/dev/null || python3 -m pip install --disable-pip-version-check -r ci-cd-platform/scripts/requirements.txt
+
+    - id: config
+      name: Validate configuration
+      shell: bash
+      env:
+        TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+      run: |
+        python3 ci-cd-platform/scripts/platform_config.py validate \
+          --config ci-cd-platform/.platform/config.yaml \
+          --schema ci-cd-platform/.platform/platform-config.schema.json \
+          --environment "${TARGET_ENVIRONMENT}" \
+          --github-output

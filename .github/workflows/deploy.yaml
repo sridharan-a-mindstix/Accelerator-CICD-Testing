@@ -1,0 +1,217 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: Environment to deploy
+        required: true
+        default: dev
+        type: choice
+        options: [dev, staging, production]
+      source_sha:
+        description: "Optional: full 40-char source commit SHA (defaults to current HEAD)"
+        required: false
+        type: string
+      image_digest:
+        description: "Optional: immutable sha256 digest (resolved from source SHA tag if omitted)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  prepare:
+    name: Select and validate deployment
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.selection.outputs.source_sha }}
+      target_environment: ${{ steps.selection.outputs.target_environment }}
+      requested_image_digest: ${{ steps.selection.outputs.image_digest }}
+      metadata_image_repository: ${{ steps.selection.outputs.image_repository }}
+      application_name: ${{ steps.config.outputs.application_name }}
+      ecr_repository: ${{ steps.config.outputs.ecr_repository }}
+      aws_account_id: ${{ steps.config.outputs.aws_account_id }}
+      ecr_aws_region: ${{ steps.config.outputs.aws_region }}
+      deploy_enabled: ${{ steps.config.outputs.deploy_enabled }}
+      github_environments_enabled: ${{ steps.config.outputs.github_environments_enabled }}
+      github_environment: ${{ steps.config.outputs.github_environment }}
+      deploy_aws_region: ${{ steps.config.outputs.deploy_aws_region }}
+      deploy_aws_role_arn: ${{ steps.config.outputs.deploy_aws_role_arn }}
+      eks_cluster_name: ${{ steps.config.outputs.eks_cluster_name }}
+      helm_release_name: ${{ steps.config.outputs.helm_release_name }}
+      helm_namespace: ${{ steps.config.outputs.helm_namespace }}
+      helm_chart: ${{ steps.config.outputs.helm_chart }}
+      helm_values_args: ${{ steps.config.outputs.helm_values_args }}
+      helm_set_values_args: ${{ steps.config.outputs.helm_set_values_args }}
+      helm_container_name: ${{ steps.config.outputs.helm_container_name }}
+      helm_timeout: ${{ steps.config.outputs.helm_timeout }}
+      helm_atomic: ${{ steps.config.outputs.helm_atomic }}
+      helm_create_namespace: ${{ steps.config.outputs.helm_create_namespace }}
+      helm_history_max: ${{ steps.config.outputs.helm_history_max }}
+    steps:
+      - name: Checkout trusted workflow helpers
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Download Release deployment metadata
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: deployment-metadata
+          path: ${{ runner.temp }}/release-metadata
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - id: selection
+        name: Select source, environment, and image
+        env:
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFAULT_MANUAL_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_DIGEST: ${{ inputs.image_digest }}
+          MANUAL_ENVIRONMENT: ${{ inputs.target_environment }}
+          MANUAL_SHA: ${{ inputs.source_sha }}
+          METADATA_FILE: ${{ runner.temp }}/release-metadata/deployment-metadata.json
+        run: python3 ci-cd-platform/scripts/workflow_handoff.py select
+
+      - name: Verify and checkout deployment source
+        env:
+          SOURCE_SHA: ${{ steps.selection.outputs.source_sha }}
+        run: |
+          RELEASE_BRANCH="$(python3 -c "
+          import re
+          try:
+              content = open('ci-cd-platform/.platform/config.yaml').read()
+              release_match = re.search(r'^release:\s*\n((?:\s+.*\n)+)', content, re.MULTILINE)
+              if release_match:
+                  branch_match = re.search(r'^\s+branch:\s*([^\s#]+)', release_match.group(1), re.MULTILINE)
+                  if branch_match:
+                      print(branch_match.group(1))
+                      import sys; sys.exit(0)
+          except Exception:
+              pass
+          print('main')
+          ")"
+          echo "Trusted release branch is ${RELEASE_BRANCH}"
+          git fetch --no-tags origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+          if ! git merge-base --is-ancestor "${SOURCE_SHA}" "origin/${RELEASE_BRANCH}"; then
+            echo "Deployment source must belong to the trusted '${RELEASE_BRANCH}' branch history" >&2
+            exit 1
+          fi
+          git checkout --detach "${SOURCE_SHA}"
+
+      - id: config
+        name: Load target environment configuration
+        uses: ./.github/actions/load-platform-config
+        with:
+          target_environment: ${{ steps.selection.outputs.target_environment }}
+
+      - name: Verify release and Helm configuration
+        env:
+          AUTOMATIC_ENVIRONMENT: ${{ steps.config.outputs.automatic_environment }}
+          DEPLOY_ENABLED: ${{ steps.config.outputs.deploy_enabled }}
+          EVENT_NAME: ${{ github.event_name }}
+          HELM_CHART: ${{ steps.config.outputs.helm_chart }}
+          HELM_VALUES_FILES: ${{ steps.config.outputs.helm_values_args }}
+          RELEASE_BRANCH: ${{ steps.config.outputs.release_branch }}
+          TARGET_ENVIRONMENT: ${{ steps.selection.outputs.target_environment }}
+          TRIGGER_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: python3 ci-cd-platform/scripts/workflow_handoff.py validate-deployment
+
+  deploy-direct:
+    name: Deploy directly to ${{ needs.prepare.outputs.target_environment }}
+    needs: prepare
+    if: >-
+      needs.prepare.outputs.deploy_enabled == 'true' &&
+      needs.prepare.outputs.github_environments_enabled != 'true'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: deployment-${{ needs.prepare.outputs.application_name }}-${{ needs.prepare.outputs.target_environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout deployment source
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Deploy immutable image
+        uses: ./.github/actions/deploy-eks
+        with:
+          aws_account_id: ${{ needs.prepare.outputs.aws_account_id }}
+          ecr_aws_region: ${{ needs.prepare.outputs.ecr_aws_region }}
+          ecr_repository: ${{ needs.prepare.outputs.ecr_repository }}
+          metadata_image_repository: ${{ needs.prepare.outputs.metadata_image_repository }}
+          requested_image_digest: ${{ needs.prepare.outputs.requested_image_digest }}
+          source_sha: ${{ needs.prepare.outputs.source_sha }}
+          deploy_aws_region: ${{ needs.prepare.outputs.deploy_aws_region }}
+          deploy_aws_role_arn: ${{ needs.prepare.outputs.deploy_aws_role_arn }}
+          eks_cluster_name: ${{ needs.prepare.outputs.eks_cluster_name }}
+          helm_release_name: ${{ needs.prepare.outputs.helm_release_name }}
+          helm_namespace: ${{ needs.prepare.outputs.helm_namespace }}
+          helm_chart: ${{ needs.prepare.outputs.helm_chart }}
+          helm_values_args: ${{ needs.prepare.outputs.helm_values_args }}
+          helm_set_values_args: ${{ needs.prepare.outputs.helm_set_values_args }}
+          helm_container_name: ${{ needs.prepare.outputs.helm_container_name }}
+          helm_timeout: ${{ needs.prepare.outputs.helm_timeout }}
+          helm_atomic: ${{ needs.prepare.outputs.helm_atomic }}
+          helm_create_namespace: ${{ needs.prepare.outputs.helm_create_namespace }}
+          helm_history_max: ${{ needs.prepare.outputs.helm_history_max }}
+
+  deploy-protected:
+    name: Deploy with GitHub Environment to ${{ needs.prepare.outputs.target_environment }}
+    needs: prepare
+    if: >-
+      needs.prepare.outputs.deploy_enabled == 'true' &&
+      needs.prepare.outputs.github_environments_enabled == 'true'
+    runs-on: ubuntu-24.04
+    environment: ${{ needs.prepare.outputs.github_environment }}
+    concurrency:
+      group: deployment-${{ needs.prepare.outputs.application_name }}-${{ needs.prepare.outputs.target_environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout deployment source
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Deploy immutable image
+        uses: ./.github/actions/deploy-eks
+        with:
+          aws_account_id: ${{ needs.prepare.outputs.aws_account_id }}
+          ecr_aws_region: ${{ needs.prepare.outputs.ecr_aws_region }}
+          ecr_repository: ${{ needs.prepare.outputs.ecr_repository }}
+          metadata_image_repository: ${{ needs.prepare.outputs.metadata_image_repository }}
+          requested_image_digest: ${{ needs.prepare.outputs.requested_image_digest }}
+          source_sha: ${{ needs.prepare.outputs.source_sha }}
+          deploy_aws_region: ${{ needs.prepare.outputs.deploy_aws_region }}
+          deploy_aws_role_arn: ${{ needs.prepare.outputs.deploy_aws_role_arn }}
+          eks_cluster_name: ${{ needs.prepare.outputs.eks_cluster_name }}
+          helm_release_name: ${{ needs.prepare.outputs.helm_release_name }}
+          helm_namespace: ${{ needs.prepare.outputs.helm_namespace }}
+          helm_chart: ${{ needs.prepare.outputs.helm_chart }}
+          helm_values_args: ${{ needs.prepare.outputs.helm_values_args }}
+          helm_set_values_args: ${{ needs.prepare.outputs.helm_set_values_args }}
+          helm_container_name: ${{ needs.prepare.outputs.helm_container_name }}
+          helm_timeout: ${{ needs.prepare.outputs.helm_timeout }}
+          helm_atomic: ${{ needs.prepare.outputs.helm_atomic }}
+          helm_create_namespace: ${{ needs.prepare.outputs.helm_create_namespace }}
+          helm_history_max: ${{ needs.prepare.outputs.helm_history_max }}

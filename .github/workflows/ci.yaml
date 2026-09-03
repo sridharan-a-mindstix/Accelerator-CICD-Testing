@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'ci-cd-platform/docs/**'
+      - '**.md'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate configuration
+    runs-on: ubuntu-24.04
+    outputs:
+      application_name:            ${{ steps.config.outputs.application_name }}
+      runtime:                     ${{ steps.config.outputs.runtime }}
+      python_version:              ${{ steps.config.outputs.python_version }}
+      node_version:                ${{ steps.config.outputs.node_version }}
+      java_version:                ${{ steps.config.outputs.java_version }}
+      go_version:                  ${{ steps.config.outputs.go_version }}
+      dockerfile:                  ${{ steps.config.outputs.dockerfile }}
+      image_context:               ${{ steps.config.outputs.image_context }}
+      platforms:                   ${{ steps.config.outputs.platforms }}
+      build_args:                  ${{ steps.config.outputs.build_args }}
+      secret_scan_enabled:         ${{ steps.config.outputs.secret_scan_enabled }}
+      dependency_scan_enabled:     ${{ steps.config.outputs.dependency_scan_enabled }}
+      dependency_scan_severity:    ${{ steps.config.outputs.dependency_scan_severity }}
+      dependency_scan_exit_code:   ${{ steps.config.outputs.dependency_scan_exit_code }}
+      build_check_enabled:         ${{ steps.config.outputs.build_check_enabled }}
+      code_scanning_enabled:       ${{ steps.config.outputs.code_scanning_enabled }}
+      docker_build_record_enabled: ${{ steps.config.outputs.docker_build_record_enabled }}
+      docker_build_record_retention_days: ${{ steps.config.outputs.docker_build_record_retention_days }}
+      trivy_cache_enabled:         ${{ steps.config.outputs.trivy_cache_enabled }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - id: config
+        name: Load repository configuration
+        uses: ./.github/actions/load-platform-config
+
+  quality:
+    name: Runtime quality checks
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        if: needs.validate.outputs.runtime == 'python'
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: ${{ needs.validate.outputs.python_version }}
+
+      - name: Set up Node.js
+        if: needs.validate.outputs.runtime == 'node'
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ needs.validate.outputs.node_version }}
+
+      - name: Set up Java
+        if: needs.validate.outputs.runtime == 'java'
+        uses: actions/setup-java@v4.7.0
+        with:
+          distribution: temurin
+          java-version: ${{ needs.validate.outputs.java_version }}
+
+      - name: Set up Go
+        if: needs.validate.outputs.runtime == 'go'
+        uses: actions/setup-go@v5.5.0
+        with:
+          go-version: ${{ needs.validate.outputs.go_version }}
+
+      - name: Install platform helper dependencies
+        run: python3 -c "import yaml, jsonschema" 2>/dev/null || python3 -m pip install --disable-pip-version-check -r ci-cd-platform/scripts/requirements.txt
+
+      - name: Run install command
+        run: python3 ci-cd-platform/scripts/platform_config.py command --command install
+
+      - name: Run lint command
+        run: python3 ci-cd-platform/scripts/platform_config.py command --command lint
+
+      - name: Run test command
+        run: python3 ci-cd-platform/scripts/platform_config.py command --command test
+
+  security:
+    name: Source security checks
+    runs-on: ubuntu-24.04
+    needs: validate
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      # Secret scanning is mandatory — enabled and fail_on_findings are const: true in the schema.
+      # continue-on-error is intentionally absent; secret findings always block the pipeline.
+      - name: Secret scan (Gitleaks)
+        if: needs.validate.outputs.secret_scan_enabled == 'true'
+        env:
+          # linux/amd64 manifest digest for v8.30.1; ubuntu-24.04 hosted runners are x64.
+          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
+        run: bash ci-cd-platform/scripts/secret_scan.sh
+
+      - name: Cache Trivy vulnerability database
+        if: needs.validate.outputs.dependency_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Dependency and filesystem scan (Trivy)
+        if: needs.validate.outputs.dependency_scan_enabled == 'true'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: ${{ needs.validate.outputs.dependency_scan_severity }}
+          exit-code: ${{ needs.validate.outputs.dependency_scan_exit_code }}
+          cache: ${{ needs.validate.outputs.trivy_cache_enabled }}
+          trivy-config: ""
+
+  code-scanning:
+    name: Optional GitHub Code Scanning report
+    runs-on: ubuntu-24.04
+    needs: validate
+    if: >-
+      needs.validate.outputs.code_scanning_enabled == 'true' &&
+      needs.validate.outputs.dependency_scan_enabled == 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Cache Trivy vulnerability database
+        if: needs.validate.outputs.dependency_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Generate Trivy SARIF report
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: ${{ needs.validate.outputs.dependency_scan_severity }}
+          exit-code: "0"
+          cache: ${{ needs.validate.outputs.trivy_cache_enabled }}
+          trivy-config: ""
+
+      - name: Upload dependency scan SARIF
+        uses: github/codeql-action/upload-sarif@v3.29.0
+        with:
+          sarif_file: trivy-fs.sarif
+
+  build-check:
+    name: Container build check
+    runs-on: ubuntu-24.04
+    needs:
+      - validate
+      - quality
+      - security
+    if: needs.validate.outputs.build_check_enabled == 'true'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      # Build with the same build-args and platforms as Release to verify parity.
+      # No AWS credentials; image is not pushed.
+      - name: Build image without pushing
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: ${{ needs.validate.outputs.docker_build_record_enabled }}
+          DOCKER_BUILD_RECORD_RETENTION_DAYS: ${{ needs.validate.outputs.docker_build_record_retention_days }}
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: ${{ needs.validate.outputs.image_context }}
+          file: ${{ needs.validate.outputs.dockerfile }}
+          platforms: ${{ needs.validate.outputs.platforms }}
+          build-args: ${{ needs.validate.outputs.build_args }}
+          push: false
+          tags: local/${{ needs.validate.outputs.application_name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,209 @@
+# -----------------------------------------------------------------------------
+# SHARED APPLICATION IDENTITY — used by CI and Release
+# -----------------------------------------------------------------------------
+application:
+  name: sample-app
+  runtime: python # python | node | java | go | container
+  owner: platform-team
+
+# -----------------------------------------------------------------------------
+# SHARED QUALITY PIPELINE — executed by CI and repeated by Release
+# Only the version matching application.runtime is installed by the workflow.
+# Commands are shell commands for the selected application runtime.
+# -----------------------------------------------------------------------------
+quality:
+  runtime_versions:
+    python: "3.12"
+    node: "22"
+    java: "21"
+    go: "1.23"
+
+  commands:
+    python:
+      install: python -m pip install --disable-pip-version-check -r requirements.txt
+      lint: python -m ruff check .
+      test: python -m pytest
+    node:
+      install: npm ci
+      lint: npm run lint --if-present
+      test: npm test --if-present
+    java:
+      install: mvn -B -ntp dependency:go-offline
+      lint: mvn -B -ntp validate
+      test: mvn -B -ntp test
+    go:
+      install: go mod download
+      lint: go vet ./...
+      test: go test -race ./...
+    container:
+      install: "true"
+      lint: "true"
+      test: "true"
+
+# -----------------------------------------------------------------------------
+# SHARED SOURCE SECURITY — executed by CI and repeated by Release
+# Secret scanning is mandatory and cannot be disabled or soft-failed.
+# Dependency scanning policy is configurable.
+# -----------------------------------------------------------------------------
+source_security:
+  secret_scan:
+    enabled: true
+    fail_on_findings: true
+  dependency_scan:
+    enabled: true
+    fail_on_findings: true
+    severity: CRITICAL,HIGH
+
+# -----------------------------------------------------------------------------
+# CI PIPELINE — pull-request-only controls
+# The Dockerfile and context used here come from release.container below so CI
+# verifies the same image definition that Release will publish.
+# timeout_minutes controls the maximum run time per job to prevent stuck runners.
+# -----------------------------------------------------------------------------
+ci:
+  container_build_check:
+    # Optional because it duplicates the image build performed by Release.
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# RELEASE PIPELINE
+# branch: the literal branch name that release.yaml's on.push.branches filter
+#         must match. Used by deploy.yaml to verify deployment source ancestry.
+#         NOTE: if you change the branch here you MUST also update the literal
+#         on.push.branches in .github/workflows/release.yaml.
+# Dockerfile and context paths are relative to the repository root.
+# -----------------------------------------------------------------------------
+release:
+  branch: main
+  # Small hand-off artifact used only by the automatic Deploy workflow.
+  deployment_metadata_retention_days: 1
+  container:
+    registry: ecr
+    repository: client-a/sample-app
+    dockerfile: Dockerfile
+    context: .
+    platforms:
+      - linux/amd64
+    build_args: {}
+
+  aws:
+    account_id: "123456789012"
+    region: us-east-1
+    oidc_role_arn: arn:aws:iam::123456789012:role/github-actions-client-a-sample-app-ecr-publisher
+
+  image_security:
+    container_scan:
+      enabled: true
+      fail_on_findings: true
+      severity: CRITICAL,HIGH
+    sbom:
+      # Optional on private GitHub Free repositories to avoid artifact storage.
+      enabled: false
+      retention_days: 7
+    provenance:
+      # Free BuildKit/OCI provenance. GitHub artifact attestation is configured
+      # separately under integrations.github.artifact_attestation.
+      enabled: true
+
+# -----------------------------------------------------------------------------
+# OPTIONAL GITHUB INTEGRATIONS
+# These are disabled by default so the template works in a private repository
+# on GitHub Free. Enable only when the repository's GitHub plan supports them.
+# -----------------------------------------------------------------------------
+integrations:
+  github:
+    code_scanning:
+      enabled: false
+    artifact_attestation:
+      enabled: false
+    deployment_environments:
+      enabled: false
+
+# -----------------------------------------------------------------------------
+# ACTIONS COST CONTROLS
+# Docker build records are diagnostic artifacts and are disabled by default.
+# Trivy's database cache is kept because it normally reduces runner time.
+# -----------------------------------------------------------------------------
+cost_controls:
+  docker_build_records:
+    enabled: false
+    retention_days: 1
+  trivy_cache:
+    enabled: true
+
+# -----------------------------------------------------------------------------
+# DEPLOY PIPELINE — deploys the immutable Release digest to EKS with Helm
+# Chart and values paths are relative to the client repository root.
+# The deployment role needs EKS describe access and Kubernetes RBAC for Helm.
+#
+# helm.container_name: the name of the application container inside the Pod
+#   spec. Leave empty to target the first container. Set explicitly when using
+#   sidecars or init containers to avoid patching the wrong container.
+# helm.create_namespace: set to false when the namespace must be
+#   pre-provisioned with specific RBAC, LimitRange, or ResourceQuota.
+# helm.history_max: maximum number of Helm release revisions to retain in the
+#   cluster (prevents etcd growth). Defaults to 10.
+# helm.atomic: when true, Helm rolls back to the previous release on failure.
+#   Recommended true for staging and production.
+# -----------------------------------------------------------------------------
+deploy:
+  enabled: true
+  automatic_environment: dev
+  environments:
+    dev:
+      github_environment: dev
+      aws:
+        region: us-east-1
+        oidc_role_arn: arn:aws:iam::123456789012:role/github-actions-client-a-sample-app-eks-deployer
+      eks:
+        cluster_name: client-a-shared
+      helm:
+        release_name: sample-app
+        namespace: sample-app-dev
+        chart: helm-chart
+        values:
+          - deployment-config/values/dev.yaml
+        set_values: {}
+        container_name: ""
+        create_namespace: true
+        history_max: 10
+        timeout: 10m
+        atomic: false
+    staging:
+      github_environment: staging
+      aws:
+        region: us-east-1
+        oidc_role_arn: arn:aws:iam::123456789012:role/github-actions-client-a-sample-app-eks-deployer
+      eks:
+        cluster_name: client-a-shared
+      helm:
+        release_name: sample-app
+        namespace: sample-app-staging
+        chart: helm-chart
+        values:
+          - deployment-config/values/staging.yaml
+        set_values: {}
+        container_name: ""
+        create_namespace: true
+        history_max: 10
+        timeout: 10m
+        atomic: true
+    production:
+      github_environment: production
+      aws:
+        region: us-east-1
+        oidc_role_arn: arn:aws:iam::123456789012:role/github-actions-client-a-sample-app-eks-deployer
+      eks:
+        cluster_name: client-a-shared
+      helm:
+        release_name: sample-app
+        namespace: sample-app-production
+        chart: helm-chart
+        values:
+          - deployment-config/values/production.yaml
+        set_values: {}
+        container_name: ""
+        create_namespace: false
+        history_max: 10
+        timeout: 10m
+        atomic: true

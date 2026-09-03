@@ -1,0 +1,41 @@
+# Dependabot configuration for exact GitHub Actions tags and Python helper packages.
+#
+# Schedule: weekly on Mondays to batch updates and minimize PR noise.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore(deps)"
+    # Group all Actions updates into a single PR to reduce noise.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: pip
+    directory: /ci-cd-platform/scripts
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      platform-python:
+        patterns:
+          - "*"

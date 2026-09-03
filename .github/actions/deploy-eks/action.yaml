@@ -1,0 +1,157 @@
+name: Deploy immutable image to EKS
+description: Resolve an ECR digest and deploy it to EKS with the repository Helm chart.
+
+inputs:
+  aws_account_id:
+    description: AWS account that owns the release ECR repository.
+    required: true
+  ecr_aws_region:
+    description: AWS region containing the release ECR repository.
+    required: true
+  ecr_repository:
+    description: ECR repository name from platform configuration.
+    required: true
+  metadata_image_repository:
+    description: Repository recorded by the triggering Release workflow.
+    required: false
+    default: ""
+  requested_image_digest:
+    description: Optional digest to cross-check against the source SHA tag.
+    required: false
+    default: ""
+  source_sha:
+    description: Full source commit SHA whose immutable image will be deployed.
+    required: true
+  deploy_aws_region:
+    description: AWS region containing the target EKS cluster.
+    required: true
+  deploy_aws_role_arn:
+    description: AWS IAM role assumed through GitHub OIDC for deployment.
+    required: true
+  eks_cluster_name:
+    description: Target EKS cluster name.
+    required: true
+  helm_release_name:
+    description: Helm release name.
+    required: true
+  helm_namespace:
+    description: Kubernetes namespace for the Helm release.
+    required: true
+  helm_chart:
+    description: Repository-relative path to the Helm chart.
+    required: true
+  helm_values_args:
+    description: Newline-separated repository-relative Helm values files.
+    required: false
+    default: ""
+  helm_set_values_args:
+    description: Newline-separated Helm set-string values.
+    required: false
+    default: ""
+  helm_container_name:
+    description: Container to verify, or empty to use the first container.
+    required: false
+    default: ""
+  helm_timeout:
+    description: Helm and Kubernetes rollout timeout.
+    required: true
+  helm_atomic:
+    description: Whether Helm should roll back automatically on failure.
+    required: true
+  helm_create_namespace:
+    description: Whether Helm should create the target namespace.
+    required: true
+  helm_history_max:
+    description: Maximum number of Helm release revisions to retain.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials (GitHub OIDC)
+      uses: aws-actions/configure-aws-credentials@v4.2.1
+      with:
+        role-to-assume: ${{ inputs.deploy_aws_role_arn }}
+        aws-region: ${{ inputs.deploy_aws_region }}
+
+    - id: image
+      name: Validate and resolve immutable ECR image
+      shell: bash
+      env:
+        AWS_ACCOUNT_ID: ${{ inputs.aws_account_id }}
+        ECR_AWS_REGION: ${{ inputs.ecr_aws_region }}
+        ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+        METADATA_REPOSITORY: ${{ inputs.metadata_image_repository }}
+        REQUESTED_DIGEST: ${{ inputs.requested_image_digest }}
+        SOURCE_SHA: ${{ inputs.source_sha }}
+      run: bash ci-cd-platform/scripts/deploy_eks.sh resolve-image
+
+    - name: Configure kubectl for EKS
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.deploy_aws_region }}
+        EKS_CLUSTER: ${{ inputs.eks_cluster_name }}
+      run: aws eks update-kubeconfig --name "${EKS_CLUSTER}" --region "${AWS_REGION}"
+
+    - name: Verify EKS connectivity and RBAC permissions
+      shell: bash
+      env:
+        HELM_NAMESPACE: ${{ inputs.helm_namespace }}
+      run: |
+        kubectl cluster-info
+        for verb in get list create update patch; do
+          kubectl auth can-i "${verb}" deployments.apps --namespace "${HELM_NAMESPACE}" \
+            || echo "Warning: cannot '${verb}' deployments in ${HELM_NAMESPACE}"
+        done
+
+    - name: Install Helm
+      uses: azure/setup-helm@v4.3.0
+      with:
+        version: v3.18.4
+
+    - name: Install deployment helper dependencies
+      shell: bash
+      run: python3 -c "import yaml, jsonschema" 2>/dev/null || python3 -m pip install --disable-pip-version-check -r ci-cd-platform/scripts/requirements.txt
+
+    - name: Validate Helm chart
+      shell: bash
+      env:
+        HELM_CHART: ${{ inputs.helm_chart }}
+        HELM_SET_VALUES: ${{ inputs.helm_set_values_args }}
+        HELM_VALUES_FILES: ${{ inputs.helm_values_args }}
+      run: bash ci-cd-platform/scripts/deploy_eks.sh lint
+
+    - name: Deploy Helm release
+      shell: bash
+      env:
+        DEPLOY_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        DEPLOY_IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+        DEPLOY_CONTAINER_NAME: ${{ inputs.helm_container_name }}
+        HELM_ATOMIC: ${{ inputs.helm_atomic }}
+        HELM_CHART: ${{ inputs.helm_chart }}
+        HELM_CREATE_NAMESPACE: ${{ inputs.helm_create_namespace }}
+        HELM_HISTORY_MAX: ${{ inputs.helm_history_max }}
+        HELM_NAMESPACE: ${{ inputs.helm_namespace }}
+        HELM_RELEASE: ${{ inputs.helm_release_name }}
+        HELM_SET_VALUES: ${{ inputs.helm_set_values_args }}
+        HELM_TIMEOUT: ${{ inputs.helm_timeout }}
+        HELM_VALUES_FILES: ${{ inputs.helm_values_args }}
+      run: bash ci-cd-platform/scripts/deploy_eks.sh deploy
+
+    - name: Verify rollout and deployed digest
+      shell: bash
+      env:
+        DEPLOY_CONTAINER_NAME: ${{ inputs.helm_container_name }}
+        EXPECTED_IMAGE: ${{ steps.image.outputs.repository }}@${{ steps.image.outputs.digest }}
+        HELM_NAMESPACE: ${{ inputs.helm_namespace }}
+        HELM_RELEASE: ${{ inputs.helm_release_name }}
+        HELM_TIMEOUT: ${{ inputs.helm_timeout }}
+      run: bash ci-cd-platform/scripts/deploy_eks.sh verify
+
+    - name: Collect safe failure diagnostics
+      if: ${{ failure() }}
+      shell: bash
+      env:
+        HELM_NAMESPACE: ${{ inputs.helm_namespace }}
+        HELM_RELEASE: ${{ inputs.helm_release_name }}
+      run: bash ci-cd-platform/scripts/deploy_eks.sh diagnostics
