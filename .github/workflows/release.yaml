@@ -53,7 +53,7 @@ jobs:
       automatic_environment:                 ${{ steps.config.outputs.automatic_environment }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - id: config
         name: Load repository configuration
@@ -79,30 +79,30 @@ jobs:
     needs: validate
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
         if: needs.validate.outputs.runtime == 'python'
-        uses: actions/setup-python@v5.6.0
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: ${{ needs.validate.outputs.python_version }}
 
       - name: Set up Node.js
         if: needs.validate.outputs.runtime == 'node'
-        uses: actions/setup-node@v4.4.0
+        uses: actions/setup-node@v7.0.0
         with:
           node-version: ${{ needs.validate.outputs.node_version }}
 
       - name: Set up Java
         if: needs.validate.outputs.runtime == 'java'
-        uses: actions/setup-java@v4.7.0
+        uses: actions/setup-java@v6.0.0
         with:
           distribution: temurin
           java-version: ${{ needs.validate.outputs.java_version }}
 
       - name: Set up Go
         if: needs.validate.outputs.runtime == 'go'
-        uses: actions/setup-go@v5.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version: ${{ needs.validate.outputs.go_version }}
 
@@ -126,7 +126,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -141,7 +141,7 @@ jobs:
 
       - name: Cache Trivy vulnerability database
         if: needs.validate.outputs.dependency_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
@@ -172,11 +172,11 @@ jobs:
       security-events: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Cache Trivy vulnerability database
         if: needs.validate.outputs.dependency_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
@@ -196,7 +196,7 @@ jobs:
           trivy-config: ""
 
       - name: Upload dependency scan SARIF
-        uses: github/codeql-action/upload-sarif@v3.29.0
+        uses: github/codeql-action/upload-sarif@v4.37.9
         with:
           sarif_file: trivy-fs.sarif
 
@@ -215,20 +215,20 @@ jobs:
       image_digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Configure AWS credentials (GitHub OIDC)
-        uses: aws-actions/configure-aws-credentials@v4.2.1
+        uses: aws-actions/configure-aws-credentials@v6.2.4
         with:
           role-to-assume: ${{ needs.validate.outputs.aws_role_arn }}
           aws-region: ${{ needs.validate.outputs.aws_region }}
 
       - id: ecr
         name: Log in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2.0.1
+        uses: aws-actions/amazon-ecr-login@v2.1.7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.10.0
+        uses: docker/setup-buildx-action@v4.3.0
 
       - id: meta
         name: Prepare image metadata
@@ -245,7 +245,7 @@ jobs:
         env:
           DOCKER_BUILD_RECORD_UPLOAD: ${{ needs.validate.outputs.docker_build_record_enabled }}
           DOCKER_BUILD_RECORD_RETENTION_DAYS: ${{ needs.validate.outputs.docker_build_record_retention_days }}
-        uses: docker/build-push-action@v6.18.0
+        uses: docker/build-push-action@v7.3.0
         with:
           context: ${{ needs.validate.outputs.image_context }}
           file: ${{ needs.validate.outputs.dockerfile }}
@@ -265,7 +265,7 @@ jobs:
 
       - name: Cache Trivy vulnerability database
         if: needs.validate.outputs.container_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
@@ -288,7 +288,7 @@ jobs:
       # to avoid generating two inconsistent SBOMs from different tools.
       - name: Generate SBOM (Syft/anchore)
         if: needs.validate.outputs.sbom_enabled == 'true'
-        uses: anchore/sbom-action@v0.18.0
+        uses: anchore/sbom-action@v0.24.2
         with:
           image: ${{ env.IMAGE_URI }}@${{ steps.push.outputs.digest }}
           format: spdx-json
@@ -298,7 +298,7 @@ jobs:
 
       - name: Upload SBOM artifact
         if: needs.validate.outputs.sbom_enabled == 'true'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: sbom-${{ needs.validate.outputs.application_name }}-${{ github.sha }}
           path: sbom.spdx.json
@@ -316,7 +316,7 @@ jobs:
         run: python3 ci-cd-platform/scripts/workflow_handoff.py create-metadata
 
       - name: Upload deployment metadata
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: deployment-metadata
           path: deployment-metadata.json
@@ -336,17 +336,17 @@ jobs:
       security-events: write
     steps:
       - name: Configure AWS credentials (GitHub OIDC)
-        uses: aws-actions/configure-aws-credentials@v4.2.1
+        uses: aws-actions/configure-aws-credentials@v6.2.4
         with:
           role-to-assume: ${{ needs.validate.outputs.aws_role_arn }}
           aws-region: ${{ needs.validate.outputs.aws_region }}
 
       - name: Log in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2.0.1
+        uses: aws-actions/amazon-ecr-login@v2.1.7
 
       - name: Cache Trivy vulnerability database
         if: needs.validate.outputs.container_scan_enabled == 'true' && needs.validate.outputs.trivy_cache_enabled == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ runner.os }}-${{ github.run_id }}
@@ -365,7 +365,7 @@ jobs:
           trivy-config: ""
 
       - name: Upload image scan SARIF
-        uses: github/codeql-action/upload-sarif@v3.29.0
+        uses: github/codeql-action/upload-sarif@v4.37.9
         with:
           sarif_file: trivy-image.sarif
 
@@ -382,16 +382,16 @@ jobs:
       attestations: write
     steps:
       - name: Configure AWS credentials (GitHub OIDC)
-        uses: aws-actions/configure-aws-credentials@v4.2.1
+        uses: aws-actions/configure-aws-credentials@v6.2.4
         with:
           role-to-assume: ${{ needs.validate.outputs.aws_role_arn }}
           aws-region: ${{ needs.validate.outputs.aws_region }}
 
       - name: Log in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2.0.1
+        uses: aws-actions/amazon-ecr-login@v2.1.7
 
       - name: Attest image provenance
-        uses: actions/attest-build-provenance@v2.3.0
+        uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ${{ needs.publish.outputs.image_uri }}
           subject-digest: ${{ needs.publish.outputs.image_digest }}
