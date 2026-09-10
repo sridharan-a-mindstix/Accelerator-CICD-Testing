@@ -166,7 +166,7 @@ deploy:
           - deployment-config/values/dev.yaml
         set_values: {}
         container_name: ""
-        create_namespace: true
+        create_namespace: false
         history_max: 10
         timeout: 10m
         atomic: false
