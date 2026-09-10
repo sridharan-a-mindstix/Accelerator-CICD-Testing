@@ -98,7 +98,11 @@ runs:
       env:
         HELM_NAMESPACE: ${{ inputs.helm_namespace }}
       run: |
-        kubectl cluster-info
+        # Use a namespace-scoped check — cluster-info requires kube-system read
+        # access which is outside the scope of a namespace-scoped access entry.
+        kubectl get namespace "${HELM_NAMESPACE}" \
+          && echo "EKS connectivity verified: namespace ${HELM_NAMESPACE} is accessible." \
+          || kubectl auth can-i get namespaces --namespace "${HELM_NAMESPACE}"
         for verb in get list create update patch; do
           kubectl auth can-i "${verb}" deployments.apps --namespace "${HELM_NAMESPACE}" \
             || echo "Warning: cannot '${verb}' deployments in ${HELM_NAMESPACE}"
