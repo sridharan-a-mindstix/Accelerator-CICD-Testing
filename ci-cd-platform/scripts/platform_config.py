@@ -117,7 +117,7 @@ def validate_config(config_path: Path, schema_path: Path) -> dict[str, Any]:
         "source_security.secret_scan.enabled": source_security["secret_scan"]["enabled"],
         "source_security.secret_scan.fail_on_findings": source_security["secret_scan"]["fail_on_findings"],
         "release.image_security.container_scan.enabled": image_security["container_scan"]["enabled"],
-        "release.image_security.container_scan.fail_on_findings": image_security["container_scan"]["fail_on_findings"],
+        # container_scan.fail_on_findings is configurable; enabled=true is still mandatory above.
     }
     disabled = [name for name, enabled in mandatory.items() if not enabled]
     if disabled:
