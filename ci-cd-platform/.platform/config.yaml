@@ -2,9 +2,9 @@
 # SHARED APPLICATION IDENTITY — used by CI and Release
 # -----------------------------------------------------------------------------
 application:
-  name: sample-app
+  name: demo-app
   runtime: python # python | node | java | go | container
-  owner: platform-team
+  owner: sridhar
 
 # -----------------------------------------------------------------------------
 # SHARED QUALITY PIPELINE — executed by CI and repeated by Release
@@ -79,7 +79,7 @@ release:
   deployment_metadata_retention_days: 1
   container:
     registry: ecr
-    repository: client-a/sample-app
+    repository: accelerator/demo-app
     dockerfile: Dockerfile
     context: .
     platforms:
@@ -87,9 +87,10 @@ release:
     build_args: {}
 
   aws:
-    account_id: "123456789012"
-    region: us-east-1
-    oidc_role_arn: arn:aws:iam::123456789012:role/github-actions-client-a-sample-app-ecr-publisher
+    account_id: "003417131700"
+    region: us-east-2
+    oidc_role_arn: arn:aws:iam::003417131700:role/sre-accelerator-github-actions-ecr-publisher
+
 
   image_security:
     container_scan:
@@ -153,10 +154,10 @@ deploy:
     dev:
       github_environment: dev
       aws:
-        region: us-east-1
-        oidc_role_arn: arn:aws:iam::123456789012:role/github-actions-client-a-sample-app-eks-deployer
+        region: us-east-2
+        oidc_role_arn: arn:aws:iam::003417131700:role/sre-accelerator-github-actions-eks-deployer-dev
       eks:
-        cluster_name: client-a-shared
+        cluster_name: sreops-dev
       helm:
         release_name: sample-app
         namespace: sample-app-dev
