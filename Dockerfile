@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 # Prevent Python from writing .pyc files and enable unbuffered logging
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,6 +10,9 @@ WORKDIR /app
 # Create a non-privileged user to run the container securely
 RUN groupadd --system --gid 10001 appgroup && \
     useradd --system --uid 10001 --gid appgroup --no-create-home --shell /sbin/nologin appuser
+
+# Patch OS-level packages to reduce CVE exposure
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
 # Install application dependencies
 COPY requirements.txt .

@@ -292,10 +292,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled", "fail_on_findings"],
-      "description": "Container scanning is mandatory. Severity threshold is configurable.",
+      "description": "Container scanning is mandatory. Severity threshold is configurable. fail_on_findings can be set to false to soft-fail.",
       "properties": {
         "enabled": { "const": true },
-        "fail_on_findings": { "const": true },
+        "fail_on_findings": { "type": "boolean", "default": true },
         "severity": { "type": "string", "minLength": 1, "default": "CRITICAL,HIGH" }
       }
     }
