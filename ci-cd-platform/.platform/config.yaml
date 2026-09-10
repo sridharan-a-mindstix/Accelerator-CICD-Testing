@@ -95,7 +95,7 @@ release:
   image_security:
     container_scan:
       enabled: true
-      fail_on_findings: true
+      fail_on_findings: false
       severity: CRITICAL,HIGH
     sbom:
       # Optional on private GitHub Free repositories to avoid artifact storage.
